@@ -1,5 +1,6 @@
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -12,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -37,72 +39,25 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class CrptApi {
 
-    /**
-     * Базовый прод-адрес ГИС МТ согласно документации.
-     */
-    public static final String DEFAULT_BASE_URL = "https://ismp.crpt.ru";
-
-    private final HttpClient http;
+    private final HttpClient httpClient;
     private final URI baseUri;
     private final ObjectMapper mapper;
     private final RateLimiter rateLimiter;
 
-    private volatile TokenProvider tokenProvider;
-    private volatile String defaultProductGroup;
+    private final TokenProvider tokenProvider;
+    private final String defaultProductGroup;
 
-    public CrptApi(TimeUnit timeUnit, int requestLimit) {
-        this(DEFAULT_BASE_URL, null, timeUnit, requestLimit);
+    private CrptApi(Builder builder) {
+        this.httpClient = builder.httpClient;
+        this.mapper = builder.objectMapper;
+        this.tokenProvider = builder.tokenProvider;
+        this.defaultProductGroup = builder.defaultProductGroup;
+        this.rateLimiter = builder.rateLimiter;
+        this.baseUri = builder.baseUri;
     }
 
-    public CrptApi(String baseUrl, TimeUnit timeUnit, int requestLimit) {
-        this(baseUrl, null, timeUnit, requestLimit);
-    }
-
-    /**
-     * Полный конструктор: базовый URL + провайдер токена + ограничения по запросам.
-     */
-    public CrptApi(String baseUrl, TokenProvider tokenProvider, TimeUnit timeUnit, int requestLimit) {
-        if (requestLimit <= 0) {
-            throw new IllegalArgumentException("requestLimit must be > 0");
-        }
-        Objects.requireNonNull(timeUnit, "timeUnit");
-        Objects.requireNonNull(baseUrl, "baseUrl");
-
-        this.baseUri = URI.create(ensureNoTrailingSlash(baseUrl));
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(20))
-                .build();
-        this.mapper = new ObjectMapper();
-        this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-        this.rateLimiter = new RateLimiter(requestLimit, timeUnit);
-        this.tokenProvider = tokenProvider; // может быть null — тогда токен нужно явно задать позже
-    }
-
-    /**
-     * Устанавливает/обновляет токен (будет подставляться в заголовок Authorization).
-     */
-    public CrptApi withToken(String bearerToken) {
-        Objects.requireNonNull(bearerToken, "bearerToken");
-        this.tokenProvider = () -> bearerToken;
-        return this;
-    }
-
-    /**
-     * Устанавливает/обновляет провайдер токена.
-     */
-    public CrptApi withTokenProvider(TokenProvider provider) {
-        Objects.requireNonNull(provider, "provider");
-        this.tokenProvider = provider;
-        return this;
-    }
-
-    /**
-     * Устанавливает товарную группу по умолчанию (например, "milk", "clothes" и т.п.).
-     */
-    public CrptApi withDefaultProductGroup(String productGroup) {
-        Objects.requireNonNull(productGroup, "productGroup");
-        this.defaultProductGroup = productGroup;
-        return this;
+    public static Builder builder() {
+        return new Builder();
     }
 
     /**
@@ -173,7 +128,7 @@ public final class CrptApi {
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                 .build();
 
-        final HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
+        final HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         final int code = resp.statusCode();
         if (code / 100 == 2) {
             final CreateResponse ok = mapper.readValue(resp.body(), CreateResponse.class);
@@ -272,7 +227,7 @@ public final class CrptApi {
                 errors.add("document.products must not be empty");
             } else {
                 int i = 0;
-                for (Document.Product p : doc.products) {
+                for (Product p : doc.products) {
                     if (p == null) {
                         errors.add("document.products[" + i + "] must not be null");
                         i++;
@@ -393,31 +348,31 @@ public final class CrptApi {
 
         @JsonProperty("products")
         public List<Product> products;          // массив товаров
+    }
 
-        /**
-         * Элемент массива products.
-         */
-        @JsonInclude(JsonInclude.Include.NON_NULL)
-        public static final class Product {
-            @JsonProperty("certificate_document")
-            public String certificateDocument;          // вид документа обязательной сертификации
-            @JsonProperty("certificate_document_date")
-            public String certificateDocumentDate;      // YYYY-MM-DD
-            @JsonProperty("certificate_document_number")
-            public String certificateDocumentNumber;
-            @JsonProperty("owner_inn")
-            public String ownerInn;
-            @JsonProperty("producer_inn")
-            public String producerInn;
-            @JsonProperty("production_date")
-            public String productionDate;               // YYYY-MM-DD
-            @JsonProperty("tnved_code")
-            public String tnvedCode;
-            @JsonProperty("uit_code")
-            public String uitCode;                      // КИ
-            @JsonProperty("uitu_code")
-            public String uituCode;                     // КИТУ
-        }
+    /**
+     * Элемент массива products.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class Product {
+        @JsonProperty("certificate_document")
+        public String certificateDocument;          // вид документа обязательной сертификации
+        @JsonProperty("certificate_document_date")
+        public String certificateDocumentDate;      // YYYY-MM-DD
+        @JsonProperty("certificate_document_number")
+        public String certificateDocumentNumber;
+        @JsonProperty("owner_inn")
+        public String ownerInn;
+        @JsonProperty("producer_inn")
+        public String producerInn;
+        @JsonProperty("production_date")
+        public String productionDate;               // YYYY-MM-DD
+        @JsonProperty("tnved_code")
+        public String tnvedCode;
+        @JsonProperty("uit_code")
+        public String uitCode;                      // КИ
+        @JsonProperty("uitu_code")
+        public String uituCode;                     // КИТУ
     }
 
     /**
@@ -510,6 +465,28 @@ public final class CrptApi {
         String getToken();
     }
 
+    public static final class FixedTokenProvider implements TokenProvider {
+        private final AtomicReference<String> token = new AtomicReference<>();
+
+        public FixedTokenProvider() {
+        }
+
+        public FixedTokenProvider(String initialToken) {
+            token.set(initialToken);
+        }
+
+        public void setToken(String newToken) {
+            token.set(Objects.requireNonNull(newToken));
+        }
+
+        @Override
+        public String getToken() {
+            String t = token.get();
+            if (t == null) throw new IllegalStateException("Token not set");
+            return t;
+        }
+    }
+
     public static class CrptApiException extends Exception {
         public CrptApiException(String message) {
             super(message);
@@ -520,24 +497,90 @@ public final class CrptApi {
         }
     }
 
-// ===================
+    public static final class Builder {
+        private HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
+        private ObjectMapper objectMapper = defaultMapper();
+        private TokenProvider tokenProvider = new FixedTokenProvider();
+        private String defaultProductGroup;
+        private RateLimiter rateLimiter = new RateLimiter(100, TimeUnit.MINUTES);
+        private URI baseUri = URI.create("https://ismp.crpt.ru");
+
+        public Builder httpClient(HttpClient httpClient) {
+            this.httpClient = Objects.requireNonNull(httpClient);
+            return this;
+        }
+
+        public Builder objectMapper(ObjectMapper objectMapper) {
+            this.objectMapper = Objects.requireNonNull(objectMapper);
+            return this;
+        }
+
+        public Builder tokenProvider(TokenProvider tokenProvider) {
+            this.tokenProvider = Objects.requireNonNull(tokenProvider);
+            return this;
+        }
+
+        public Builder defaultProductGroup(String defaultProductGroup) {
+            this.defaultProductGroup = Objects.requireNonNull(defaultProductGroup);
+            return this;
+        }
+
+        public Builder rateLimiter(RateLimiter rateLimiter) {
+            this.rateLimiter = Objects.requireNonNull(rateLimiter);
+            return this;
+        }
+
+        public Builder baseUri(String baseUri) {
+            this.baseUri = URI.create(baseUri);
+            return this;
+        }
+
+        public CrptApi build() {
+            Objects.requireNonNull(defaultProductGroup, "defaultProductGroup must be set");
+            return new CrptApi(this);
+        }
+    }
+
+    private static ObjectMapper defaultMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        return mapper;
+    }
+
+    // ===================
 // Пример использования:
 // ===================
-// CrptApi api = new CrptApi(TimeUnit.MINUTES, 100)
-//         .withToken("<JWT>")
-//         .withDefaultProductGroup(CrptApi.ProductGroup.MILK.toString());
+//    ObjectMapper mapper = new ObjectMapper()
+//            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 //
-// CrptApi.Document doc = new CrptApi.Document();
-// doc.ownerInn = "1234567890";
-// doc.producerInn = "1234567890";
-// doc.productionDate = "2020-01-23";
-// doc.productionType = "LOCAL"; // пример, заполните согласно справочнику вашей ТГ
-// doc.products = new ArrayList<>();
-// CrptApi.Document.Product p = new CrptApi.Document.Product();
-// p.tnvedCode = "6401100000";
-// p.uitCode = "010463003407002921wskg1E44R1qym2406401";
-// doc.products.add(p);
+//    // Потокобезопасный провайдер токена (можно ротировать без мутаций клиента)
+//    CrptApi.FixedTokenProvider tokens = new CrptApi.FixedTokenProvider("<JWT>");
 //
-// UUID id = api.createDocumentRF(doc, "<detached-signature-base64>");
-// System.out.println("Created doc: " + id);
+//    CrptApi api = CrptApi.builder()
+//            .tokenProvider(tokens)
+//            .defaultProductGroup(CrptApi.ProductGroup.MILK.toString())
+//            .objectMapper(mapper)
+//            .rateLimiter(new CrptApi.RateLimiter(100, TimeUnit.MINUTES))
+//            .baseUri("https://ismp.crpt.ru") // Базовый прод-адрес ГИС МТ согласно документации.
+//            .build();
+//
+//    // Формируем документ (DTO как раньше — поля публичные)
+//    CrptApi.Document doc = new CrptApi.Document();
+//    doc.ownerInn ="1234567890";
+//    doc.producerInn ="1234567890";
+//    doc.productionDate ="2020-01-23";
+//    doc.productionType ="LOCAL"; // пример, заполните согласно справочнику вашей ТГ
+//    doc.products =new ArrayList<>();
+//
+//    CrptApi.Product p = new CrptApi.Product();
+//    p.tnvedCode ="6401100000";
+//    p.uitCode ="010463003407002921wskg1E44R1qym2406401";
+//        doc.products.add(p);
+//
+//    // Отправка
+//    UUID id = api.createDocumentRF(doc, "<detached-signature-base64>");
+//        System.out.println("Created doc: "+id);
+//
+//// При необходимости можно безопасно ротировать токен:
+//        tokens.setToken("<NEW_JWT>");
 }
